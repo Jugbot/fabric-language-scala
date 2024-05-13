@@ -1,100 +1,279 @@
-plugins {
-    id "java-library"
-    id "scala"
-    id "maven-publish"
-    id 'fabric-loom' version '0.10.30'
-    id "com.matthewprenger.cursegradle" version "1.4.0"
+buildscript {
+    dependencies {
+        def scalaVersion = file("generated/scala_version.txt").text
+    }
 }
 
-sourceCompatibility = JavaVersion.VERSION_1_8
-targetCompatibility = JavaVersion.VERSION_1_8
+plugins {
+    id 'fabric-loom' version '1.4.4'
+    id 'maven-publish'
+    id "com.diffplug.spotless" version "6.19.0"
+    id 'me.modmuss50.mod-publish-plugin' version '0.4.1'
+}
 
-archivesBaseName = project.archives_base_name
-group = project.maven_group
+group = project.group
 
-version = mod_version
 def ENV = System.getenv()
-version = version + "+scala." + project.scala_version + (ENV.GITHUB_ACTIONS ? "" : ".local")
+def LIBRARY_VERSIONS_FILE = "generated/library_versions.json"
+def SCALA_VERSION_FILE = "generated/scala_version.txt"
+
+def scalaLib = "org.scala-lang:scala3-library_3"
+def libraries = [
+    scalaLib,
+]
+
+def libVersions = new JsonSlurper().parse(file(LIBRARY_VERSIONS_FILE))
+def hasMissingLibVersion = !libVersions.keySet().containsAll(libraries)
+def scalaVersion = file(SCALA_VERSION_FILE).text
+
+println("Scala: ${scalaVersion}")
+println("Libraries:")
+libVersions.forEach { k, v ->
+    println("\t${k}:${v}")
+}
+
+version = "${project.modVersion}+scala.${scalaVersion}" + (ENV.GITHUB_ACTIONS ? "" : ".local")
+
+loom {
+    mods {
+        flk {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+configurations {
+    includeAndExpose
+
+    modApi {
+        extendsFrom includeAndExpose
+    }
+    include {
+        extendsFrom includeAndExpose
+    }
+}
+
+configurations.all {
+    resolutionStrategy {
+        failOnNonReproducibleResolution()
+    }
+}
 
 dependencies {
-    minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    minecraft "com.mojang:minecraft:${project.minecraftVersion}"
+    mappings "net.fabricmc:yarn:${project.mappingsVersion}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loaderVersion}"
+	testImplementation "net.fabricmc:fabric-loader-junit:${project.loaderVersion}"
 
-	include(api("org.scala-lang:scala3-library_3:${project.scala_version}"))
-	// Depended on by scala3
-	include(api("org.scala-lang:scala-library:2.13.6"))
+    if (hasMissingLibVersion) {
+        println("Contains missing library version, run updateLibraryVersions task!")
+    } else {
+        libraries.forEach {
+            includeAndExpose("${it}:${libVersions[it]}")
+        }
+    }
 }
 
 processResources {
-	inputs.property "version", project.version
+    inputs.property "version", project.version
 
-	filesMatching("fabric.mod.json") {
-		expand "version": project.version
-	}
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 8
+}
+
+tasks.withType(ScalaCompile) {
+    scalaCompileOptions.apply {
+        additionalParameters = additionalParameters.orEmpty() + "-target:jvm-1.8"
+    }
 }
 
 java {
-	withSourcesJar()
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+spotless {
+    scala {
+        licenseHeaderFile(rootProject.file("HEADER"))
+    }
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.base.archivesName.get()}" }
+    }
+}
+
+test {
+	useJUnitPlatform()
+	afterEvaluate {
+		// See: https://github.com/FabricMC/fabric-loader/pull/585
+		def classPathGroups = loom.mods.stream()
+			.map { modSettings ->
+				net.fabricmc.loom.util.gradle.SourceSetHelper.getClasspath(modSettings, getProject()).stream()
+					.map(File.&getAbsolutePath)
+					.collect(java.util.stream.Collectors.joining(File.pathSeparator))
+			}
+			.collect(java.util.stream.Collectors.joining(File.pathSeparator+File.pathSeparator))
+
+		systemProperty("fabric.classPathGroups", classPathGroups)
+	}
+}
+
+task processMDTemplates(type: Copy) {
+    group = "documentation"
+    doFirst {
+        if (hasMissingLibVersion) {
+            throw new GradleException("Contains missing library version, run updateLibraryVersions task first!")
+        }
+    }
+
+    from(file("templates"))
+    include("**/*.template.md")
+    filesMatching("**/*.template.md") {
+        name = sourceName.replace("template.", "")
+        def template = [
+                MOD_VERSION   : "${project.modVersion}+scala.${scalaVersion}",
+                LOADER_VERSION: project.loaderVersion
+        ]
+        libraries.forEach {
+            def key = it.split(":", 2)[1].replace("-", "_").toUpperCase(Locale.ROOT) + "_VERSION"
+            template.put(key, libVersions[it])
+        }
+        expand(template)
+    }
+    destinationDir = rootDir
 }
 
 publishing {
     publications {
-        maven(MavenPublication) {
-			from components.java
+        mavenJava(MavenPublication) {
+            groupId = project.group
+            artifactId = project.name.toLowerCase()
+            version = project.version
+
+            from components.java
         }
     }
+
     repositories {
-		repositories {
-			if (ENV.MAVEN_URL) {
-				maven {
-					url ENV.MAVEN_URL
-					credentials {
-						username ENV.MAVEN_USERNAME
-						password ENV.MAVEN_PASSWORD
-					}
-				}
-			}
-		}
+        if (ENV.MAVEN_URL) {
+            maven {
+                url ENV.MAVEN_URL
+                credentials {
+                    username ENV.MAVEN_USERNAME
+                    password ENV.MAVEN_PASSWORD
+                }
+            }
+        }
     }
 }
 
-curseforge {
-	if (ENV.CURSEFORGE_API_KEY) {
-		apiKey = ENV.CURSEFORGE_API_KEY
-	}
+publishMods {
+    file = remapJar.archiveFile
+    changelog = ENV.CHANGELOG ?: "No changelog provided"
+    type = STABLE
+    displayName = "Fabric Language Scala ${project.version}"
+    modLoaders.add("fabric")
+    dryRun = ENV.GITHUB_TOKEN == null
 
-    project {
-        id = '309275'
-        changelog = 'A changelog can be found at https://github.com/FabricMC/fabric-language-scala/commits/master'
-        releaseType = 'release'
-		addGameVersion '1.17.1'
-        addGameVersion '1.16.5'
-		addGameVersion '1.15.2'
-		addGameVersion '1.14.4'
-		addGameVersion "Fabric"
+    curseforge {
+        accessToken = providers.environmentVariable("CURSEFORGE_API_KEY")
+        projectId = "309275"
+        minecraftVersionRange {
+			start = "1.14"
+			end = "latest"
+		}
+    }
+    // modrinth {
+    //     accessToken = providers.environmentVariable("MODRINTH_TOKEN")
+    //     projectId = "Ha28R6CL"
+	// 	minecraftVersionRange {
+	// 		start = "1.14"
+	// 		end = "latest"
+	// 	}
+    // }
+    github {
+        accessToken = providers.environmentVariable("GITHUB_TOKEN")
+        repository = ENV.CI != null ? providers.environmentVariable("GITHUB_REPOSITORY") : "FabricMC/dryrun"
+        commitish = ENV.CI != null ? getBranch() : "dryrun"
+    }
+}
 
-        mainArtifact(file("${project.buildDir}/libs/${base.archivesBaseName}-${version}.jar")) {
-            displayName = "Fabric Language Scala $version"
-        }
+import groovy.json.JsonBuilder
+import groovy.json.JsonSlurper
+import groovy.xml.XmlSlurper
+import org.gradle.util.VersionNumber
+
+import java.nio.charset.StandardCharsets
+
+static def getBranch() {
+    def ENV = System.getenv()
+    if (ENV.GITHUB_REF) {
+        def branch = ENV.GITHUB_REF
+        return branch.substring(branch.lastIndexOf("/") + 1)
     }
 
-    options {
-        forgeGradleIntegration = false
-    }
+    throw new RuntimeException("Unable to get branch")
 }
 
 // A task to ensure that the version being released has not already been released.
 task checkVersion {
-	doFirst {
-		def xml = new URL("https://maven.fabricmc.net/net/fabricmc/fabric-language-scala/maven-metadata.xml").text
-		def metadata = new XmlSlurper().parseText(xml)
-		def versions = metadata.versioning.versions.version*.text();
-		if (versions.contains(version)) {
-			throw new RuntimeException("${version} has already been released!")
-		}
-	}
+    doFirst {
+        def xml = new URL("https://maven.fabricmc.net/net/fabricmc/fabric-language-scala/maven-metadata.xml").text
+        def metadata = new XmlSlurper().parseText(xml)
+        def versions = metadata.versioning.versions.version*.text()
+        if (versions.contains(version)) {
+            throw new RuntimeException("${version} has already been released!")
+        }
+    }
 }
 
-publish.mustRunAfter checkVersion
-project.tasks.curseforge.mustRunAfter checkVersion
+task updateLibraryVersions {
+    group = "update"
+    doFirst {
+        def output = [:]
+        def slurper = new XmlSlurper()
+        for (def lib : libraries) {
+            def split = lib.split(":", 2)
+            def group = split[0].replace(".", "/")
+            def artifact = split[1]
+            def xml = new URL("https://repo1.maven.org/maven2/${group}/${artifact}/maven-metadata.xml").text
+            def metadata = slurper.parseText(xml)
+            def versions = metadata.versioning.versions.version*.text()
+
+            def latest = versions[0]
+            def latestParsed = VersionNumber.parse(latest)
+            for (def version : versions) {
+                def parsed = VersionNumber.parse(version)
+                if (parsed.qualifier == null && parsed > latestParsed) {
+                    latestParsed = parsed
+                    latest = version
+                }
+            }
+
+            println("${lib} = ${latest}")
+            output.put(lib, latest)
+
+            if (lib == scalaLib) {
+                file(SCALA_VERSION_FILE).setText(latest, StandardCharsets.UTF_8.name())
+            }
+        }
+        def json = new JsonBuilder(output)
+        file(LIBRARY_VERSIONS_FILE).setText(json.toPrettyString(), StandardCharsets.UTF_8.name())
+    }
+}
+
+task updateVersions {
+    group = "update"
+    dependsOn(updateLibraryVersions)
+}
+
+tasks.publishMods.dependsOn checkVersion
+publish.dependsOn checkVersion

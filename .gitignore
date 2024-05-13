@@ -3,17 +3,26 @@
 
 # Folders
 !/gradle
+!/buildSrc
 !/src
+!/generated
 
 # Files
 !/.gitattributes
 !/.gitignore
 !/build.gradle
-!/settings.gradle
 !/gradle.properties
 !/gradlew
 !/gradlew.bat
 !/HEADER
+!/Jenkinsfile
 !/LICENSE
 !/README.md
-!.github
+!/settings.gradle
+
+!/sample-mod
+!/templates/
+!/.github/
+
+build/
+.gradle/
